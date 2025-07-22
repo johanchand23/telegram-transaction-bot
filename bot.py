@@ -294,7 +294,7 @@ if __name__ == '__main__':
     while True:
         try:
             print("🔄 Starting polling...")
-            bot.polling(none_stop=True, interval=2, timeout=30, restart_on_change=True)
+            bot.polling(none_stop=True, interval=2, timeout=30)  # Removed restart_on_change
         except Exception as e:
             print(f"⚠️ Polling error: {e}")
             print("🔄 Restarting in 10 seconds...")

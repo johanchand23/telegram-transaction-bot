@@ -1,8 +1,9 @@
-# Improved bot with better error handling and debugging
+# Fixed bot that downloads Telegram images before OCR
 import telebot
 import requests
 import json
 import os
+import base64
 from io import BytesIO
 import gspread
 from google.oauth2.service_account import Credentials
@@ -37,28 +38,80 @@ def init_google_sheets():
         print(f"Google Sheets connection error: {e}")
         return None
 
-# Enhanced OCR function with better error handling
-def extract_text_from_image(image_url):
+# Download image from Telegram
+def download_telegram_image(bot_token, file_path):
     try:
-        print(f"🔍 Attempting OCR on: {image_url}")
+        download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+        print(f"📥 Downloading image from: {download_url}")
+        
+        response = requests.get(download_url, timeout=30)
+        response.raise_for_status()
+        
+        print(f"✅ Image downloaded, size: {len(response.content)} bytes")
+        return response.content
+    except Exception as e:
+        print(f"❌ Failed to download image: {e}")
+        return None
+
+# Enhanced OCR function with image download
+def extract_text_from_telegram_image(bot_token, file_path):
+    try:
+        print(f"🔍 Starting OCR process...")
         print(f"🔑 Using API Key: {OCR_API_KEY[:8]}...")
         
+        # Download image from Telegram
+        image_data = download_telegram_image(bot_token, file_path)
+        if not image_data:
+            return None, "Failed to download image from Telegram"
+        
+        # Convert image to base64
+        image_base64 = base64.b64encode(image_data).decode('utf-8')
+        
+        # Determine image format from file extension or content
+        file_extension = file_path.lower().split('.')[-1] if '.' in file_path else 'jpg'
+        if file_extension == 'jpg':
+            file_extension = 'jpeg'
+        
+        # Detect file type from image content if extension detection fails
+        if image_data.startswith(b'\x89PNG'):
+            file_extension = 'png'
+            content_type = 'image/png'
+        elif image_data.startswith(b'\xFF\xD8\xFF'):
+            file_extension = 'jpeg'  
+            content_type = 'image/jpeg'
+        elif image_data.startswith(b'GIF8'):
+            file_extension = 'gif'
+            content_type = 'image/gif'
+        else:
+            # Default to JPEG for Telegram photos
+            file_extension = 'jpeg'
+            content_type = 'image/jpeg'
+        
+        # Create base64 data URI with proper content type
+        base64_data_uri = f"data:{content_type};base64,{image_base64}"
+        
+        print(f"📄 Image converted to base64, length: {len(base64_data_uri)}")
+        
+        # OCR.space API request with base64 image and explicit file type
         payload = {
-            'url': image_url,
+            'base64Image': base64_data_uri,
             'apikey': OCR_API_KEY,
             'language': 'eng',
-            'isOverlayRequired': False,
+            'isOverlayRequired': 'false',
             'detectOrientation': 'true',
             'scale': 'true',
-            'OCREngine': '2'  # Use engine 2 for better accuracy
+            'OCREngine': '2',  # Use engine 2 for better accuracy
+            'filetype': content_type  # Explicitly specify file type
         }
         
-        response = requests.post('https://api.ocr.space/parse/image', data=payload, timeout=60)
+        print("📡 Sending OCR request...")
+        response = requests.post('https://api.ocr.space/parse/image', data=payload, timeout=90)
         print(f"📡 OCR API Response Status: {response.status_code}")
         
         if response.status_code != 200:
-            print(f"❌ HTTP Error: {response.status_code}")
-            return None, f"HTTP Error: {response.status_code}"
+            error_msg = f"HTTP Error: {response.status_code} - {response.text}"
+            print(f"❌ {error_msg}")
+            return None, error_msg
             
         result = response.json()
         print(f"📄 OCR API Response: {json.dumps(result, indent=2)}")
@@ -79,7 +132,7 @@ def extract_text_from_image(image_url):
         return extracted_text, None
         
     except requests.exceptions.Timeout:
-        error_msg = "OCR request timed out"
+        error_msg = "OCR request timed out (90 seconds)"
         print(f"⏰ {error_msg}")
         return None, error_msg
     except requests.exceptions.RequestException as e:
@@ -231,21 +284,39 @@ Kirim foto untuk memulai!
 Commands:
 /help - Bantuan
 /status - Status bot
-/debug - Test OCR API
+/test - Test OCR dengan gambar sampel
     """
     bot.reply_to(message, welcome_text)
 
-@bot.message_handler(commands=['debug'])
-def debug_ocr(message):
-    debug_info = f"""
-🔧 Debug Info:
-📡 OCR API Key: {'✅ Set' if OCR_API_KEY != 'YOUR_OCR_API_KEY' else '❌ Not set'}
-🤖 Bot Token: {'✅ Set' if BOT_TOKEN != 'YOUR_BOT_TOKEN_HERE' else '❌ Not set'}
-📊 Sheet ID: {'✅ Set' if GOOGLE_SHEET_ID != 'your_google_sheet_id' else '❌ Not set'}
-
-Send me a test image to see detailed OCR debug info!
-    """
-    bot.reply_to(message, debug_info)
+@bot.message_handler(commands=['test'])
+def test_ocr_api(message):
+    test_msg = bot.reply_to(message, "🧪 Testing OCR API dengan gambar sampel...")
+    
+    try:
+        # Test with a simple online image
+        test_image_url = "https://dl.a9t9.com/ocr/solarcell.jpg"
+        
+        payload = {
+            'url': test_image_url,
+            'apikey': OCR_API_KEY,
+            'language': 'eng',
+            'isOverlayRequired': 'false'
+        }
+        
+        response = requests.post('https://api.ocr.space/parse/image', data=payload, timeout=30)
+        result = response.json()
+        
+        if result.get('IsErroredOnProcessing'):
+            error_msg = result.get('ErrorMessage', 'Unknown error')
+            bot.edit_message_text(f"❌ OCR Test Failed: {error_msg}", message.chat.id, test_msg.message_id)
+        elif result.get('ParsedResults') and len(result['ParsedResults']) > 0:
+            extracted_text = result['ParsedResults'][0]['ParsedText'][:100]
+            bot.edit_message_text(f"✅ OCR Test Success!\n\nSample text: {extracted_text}...", message.chat.id, test_msg.message_id)
+        else:
+            bot.edit_message_text("❌ OCR Test: No text extracted", message.chat.id, test_msg.message_id)
+            
+    except Exception as e:
+        bot.edit_message_text(f"❌ OCR Test Error: {str(e)}", message.chat.id, test_msg.message_id)
 
 @bot.message_handler(commands=['help'])
 def send_help(message):
@@ -262,14 +333,15 @@ def send_help(message):
 
 2. Foto daftar transaksi
 3. Kirim foto ke bot ini
-4. Tunggu pemrosesan (30-60 detik)
+4. Tunggu pemrosesan (30-90 detik)
 5. Terima konfirmasi dengan data yang diekstrak
 
 💡 Tips:
 • Pastikan tulisan jelas dan mudah dibaca
 • Gunakan format: [qty]pc/pcs [nama] [harga] [total]
 • Sertakan tanggal di bagian atas
-• Coba /debug untuk informasi teknis
+• Coba /test untuk test API
+• Coba /status untuk status bot
 
 ❓ Ada masalah? Pastikan tulisan terbaca dengan jelas!
     """
@@ -285,8 +357,11 @@ def send_status(message):
 📊 Google Sheets: {sheet_status}
 👁️ OCR Service: {ocr_status}
 🤖 Bot: ✅ Berjalan
+🔑 API Key: {OCR_API_KEY[:8]}...
 
 Update terakhir: {datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+💡 Gunakan /test untuk test OCR API
     """
     bot.reply_to(message, status_text)
 
@@ -295,7 +370,7 @@ Update terakhir: {datetime.now().strftime("%Y-%m-%d %H:%M")}
 def handle_photo(message):
     try:
         # Send processing message
-        processing_msg = bot.reply_to(message, "📝 Memproses daftar transaksi... Mohon tunggu 30-60 detik.")
+        processing_msg = bot.reply_to(message, "📝 Memproses daftar transaksi... Mohon tunggu 30-90 detik.")
         
         # Get the largest photo size
         photo = message.photo[-1]
@@ -303,15 +378,13 @@ def handle_photo(message):
         # Get file info
         file_info = bot.get_file(photo.file_id)
         
-        # Download photo
-        photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
-        print(f"📸 Processing photo: {photo_url}")
+        print(f"📸 Processing photo: {file_info.file_path}")
         
-        # Extract text using OCR with error details
-        ocr_text, error_msg = extract_text_from_image(photo_url)
+        # Extract text using OCR with image download
+        ocr_text, error_msg = extract_text_from_telegram_image(BOT_TOKEN, file_info.file_path)
         
         if not ocr_text:
-            error_response = f"❌ Maaf, tidak bisa membaca tulisan.\n\n🔍 Detail error: {error_msg}\n\n💡 Tips:\n• Pastikan foto jelas dan terang\n• Tulisan tidak terlalu kecil\n• Tidak ada bayangan pada kertas\n• Coba ambil foto lagi"
+            error_response = f"❌ Maaf, tidak bisa membaca tulisan.\n\n🔍 Detail error: {error_msg}\n\n💡 Tips:\n• Pastikan foto jelas dan terang\n• Tulisan tidak terlalu kecil\n• Tidak ada bayangan pada kertas\n• Coba /test untuk test API\n• Coba ambil foto lagi"
             bot.edit_message_text(error_response, message.chat.id, processing_msg.message_id)
             return
         
@@ -359,37 +432,11 @@ def handle_photo(message):
 # Handle other messages
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    bot.reply_to(message, "📝 Silakan kirim foto daftar transaksi tulisan tangan untuk diproses!\n\nGunakan /help untuk panduan lengkap atau /debug untuk info teknis.")
+    bot.reply_to(message, "📝 Silakan kirim foto daftar transaksi tulisan tangan untuk diproses!\n\nGunakan /help untuk panduan lengkap atau /test untuk test OCR API.")
 
 if __name__ == '__main__':
     print("🤖 Transaction Bot starting...")
     print(f"🔑 OCR API Key: {'✅ Set' if OCR_API_KEY != 'YOUR_OCR_API_KEY' else '❌ NOT SET!'}")
     print(f"🤖 Bot Token: {'✅ Set' if BOT_TOKEN != 'YOUR_BOT_TOKEN_HERE' else '❌ NOT SET!'}")
-    
-    # For Render web service compatibility
-    import threading
-    from flask import Flask
-    
-    # Create a simple web server to satisfy Render's port requirement
-    app = Flask(__name__)
-    
-    @app.route('/')
-    def health_check():
-        return "Bot is running!"
-    
-    @app.route('/health')
-    def health():
-        return {"status": "healthy", "bot": "running"}
-    
-    # Start Flask in a separate thread
-    def run_flask():
-        port = int(os.environ.get("PORT", 8080))
-        app.run(host='0.0.0.0', port=port, debug=False)
-    
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
     print("✅ Bot berjalan dan menunggu pesan!")
-    print(f"🌐 Web server running on port {os.environ.get('PORT', 8080)}")
     bot.polling(none_stop=True)

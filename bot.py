@@ -261,7 +261,23 @@ def handle_message(message):
 
 if __name__ == '__main__':
     print("🤖 Transaction Bot starting...")
-    print(f"🔑 OCR API Key: {'✅ Set' if OCR_API_KEY != 'YOUR_OCR_API_KEY' else '❌ NOT SET!'}")
+    print("🔍 Debug: Checking environment variables...")
+    
+    # Debug environment variables
+    print(f"🔑 OCR API Key: {'✅ Set (' + str(len(OCR_API_KEY)) + ' chars)' if OCR_API_KEY != 'YOUR_OCR_API_KEY' else '❌ NOT SET!'}")
+    print(f"🤖 Bot Token: {'✅ Set (' + str(len(BOT_TOKEN)) + ' chars)' if BOT_TOKEN != 'YOUR_BOT_TOKEN_HERE' else '❌ NOT SET!'}")
+    print(f"📊 Sheet ID: {'✅ Set (' + str(len(GOOGLE_SHEET_ID)) + ' chars)' if GOOGLE_SHEET_ID != 'your_google_sheet_id' else '❌ NOT SET!'}")
+    
+    # Test Google Sheets connection
+    try:
+        print("🔍 Testing Google Sheets connection...")
+        sheet_test = init_google_sheets()
+        if sheet_test:
+            print("✅ Google Sheets: Connected successfully!")
+        else:
+            print("❌ Google Sheets: Connection failed")
+    except Exception as e:
+        print(f"❌ Google Sheets error: {e}")
     
     # Force clear webhook and ensure single instance
     try:
@@ -270,9 +286,9 @@ if __name__ == '__main__':
         print("✅ Webhook cleared")
         time.sleep(2)  # Wait for clear
     except Exception as e:
-        print(f"Webhook clear warning: {e}")
+        print(f"⚠️ Webhook clear warning: {e}")
     
-    print("✅ Bot running in polling mode!")
+    print("✅ Bot starting polling mode...")
     
     # Start polling with more robust error handling
     while True:

@@ -1,3 +1,4 @@
+# Save this entire file as "bot.py"
 import telebot
 import requests
 import json

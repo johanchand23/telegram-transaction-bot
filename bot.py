@@ -168,7 +168,33 @@ def send_welcome(message):
 ✅ Memberikan konfirmasi
 
 Kirim foto untuk memulai!
+
+Commands:
+/help - Bantuan
+/status - Cek status bot
     """)
+
+@bot.message_handler(commands=['help'])
+def send_help(message):
+    help_text = """
+🤖 Panduan Transaction Bot:
+
+📷 Cara menggunakan:
+1. Tulis daftar transaksi di kertas
+2. Foto daftar transaksi
+3. Kirim foto ke bot ini
+4. Tunggu pemrosesan
+5. Terima konfirmasi
+
+💡 Tips:
+• Pastikan tulisan jelas
+• Format: [qty]pc/pcs [nama] [harga] [total]
+• Sertakan tanggal di bagian atas
+
+Commands:
+/status - Cek status koneksi
+    """
+    bot.reply_to(message, help_text)
 
 @bot.message_handler(commands=['status'])
 def send_status(message):
@@ -237,19 +263,23 @@ if __name__ == '__main__':
     print("🤖 Transaction Bot starting...")
     print(f"🔑 OCR API Key: {'✅ Set' if OCR_API_KEY != 'YOUR_OCR_API_KEY' else '❌ NOT SET!'}")
     
-    # Clear any existing webhook
+    # Force clear webhook and ensure single instance
     try:
+        print("🧹 Clearing webhook...")
         bot.remove_webhook()
-        print("🧹 Webhook cleared")
-    except:
-        pass
+        print("✅ Webhook cleared")
+        time.sleep(2)  # Wait for clear
+    except Exception as e:
+        print(f"Webhook clear warning: {e}")
     
     print("✅ Bot running in polling mode!")
     
-    # Start polling with retry logic
+    # Start polling with more robust error handling
     while True:
         try:
-            bot.polling(none_stop=True, interval=1, timeout=60)
+            print("🔄 Starting polling...")
+            bot.polling(none_stop=True, interval=2, timeout=30, restart_on_change=True)
         except Exception as e:
-            print(f"Polling error: {e}")
-            time.sleep(5)  # Wait 5 seconds before retrying
+            print(f"⚠️ Polling error: {e}")
+            print("🔄 Restarting in 10 seconds...")
+            time.sleep(10)  # Wait longer before retrying

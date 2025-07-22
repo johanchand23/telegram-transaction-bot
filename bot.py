@@ -1,4 +1,4 @@
-# Fixed bot that downloads Telegram images before OCR
+# Webhook-based bot to avoid 409 conflicts
 import telebot
 import requests
 import json
@@ -9,6 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 import re
+from flask import Flask, request
 
 # Bot token from BotFather
 BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
@@ -19,7 +20,11 @@ OCR_API_KEY = os.getenv('OCR_API_KEY', 'YOUR_OCR_API_KEY')
 # Google Sheets setup
 GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID', 'your_google_sheet_id')
 
+# Get webhook URL from environment (Render provides this automatically)
+WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://your-app.onrender.com')
+
 bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
 
 # Initialize Google Sheets client
 def init_google_sheets():
@@ -67,30 +72,20 @@ def extract_text_from_telegram_image(bot_token, file_path):
         # Convert image to base64
         image_base64 = base64.b64encode(image_data).decode('utf-8')
         
-        # Determine image format from file extension or content
-        file_extension = file_path.lower().split('.')[-1] if '.' in file_path else 'jpg'
-        if file_extension == 'jpg':
-            file_extension = 'jpeg'
-        
-        # Detect file type from image content if extension detection fails
+        # Detect file type from image content
         if image_data.startswith(b'\x89PNG'):
-            file_extension = 'png'
             content_type = 'image/png'
         elif image_data.startswith(b'\xFF\xD8\xFF'):
-            file_extension = 'jpeg'  
             content_type = 'image/jpeg'
         elif image_data.startswith(b'GIF8'):
-            file_extension = 'gif'
             content_type = 'image/gif'
         else:
-            # Default to JPEG for Telegram photos
-            file_extension = 'jpeg'
-            content_type = 'image/jpeg'
+            content_type = 'image/jpeg'  # Default for Telegram photos
         
         # Create base64 data URI with proper content type
         base64_data_uri = f"data:{content_type};base64,{image_base64}"
         
-        print(f"📄 Image converted to base64, length: {len(base64_data_uri)}")
+        print(f"📄 Image converted to base64, type: {content_type}")
         
         # OCR.space API request with base64 image and explicit file type
         payload = {
@@ -100,8 +95,8 @@ def extract_text_from_telegram_image(bot_token, file_path):
             'isOverlayRequired': 'false',
             'detectOrientation': 'true',
             'scale': 'true',
-            'OCREngine': '2',  # Use engine 2 for better accuracy
-            'filetype': content_type  # Explicitly specify file type
+            'OCREngine': '2',
+            'filetype': content_type
         }
         
         print("📡 Sending OCR request...")
@@ -131,14 +126,6 @@ def extract_text_from_telegram_image(bot_token, file_path):
         
         return extracted_text, None
         
-    except requests.exceptions.Timeout:
-        error_msg = "OCR request timed out (90 seconds)"
-        print(f"⏰ {error_msg}")
-        return None, error_msg
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Network error: {str(e)}"
-        print(f"🌐 {error_msg}")
-        return None, error_msg
     except Exception as e:
         error_msg = f"Unexpected error: {str(e)}"
         print(f"💥 {error_msg}")
@@ -159,18 +146,15 @@ def parse_handwritten_transactions(ocr_text):
     lines = [line.strip() for line in lines if line.strip()]
     print(f"📄 Processing {len(lines)} lines")
     
-    # Look for transaction pattern: quantity + description + price + total
+    # Look for transaction pattern
     for i, line in enumerate(lines):
         line = line.strip()
         print(f"Line {i+1}: '{line}'")
         
-        # Skip header lines, empty lines, or lines with just "TANTY"
         if not line or 'tanty' in line.lower() or len(line) < 5:
-            print(f"  ⏭️ Skipping header/empty line")
             continue
             
         # Pattern for transaction lines: "1pc Std ballon jw sCHOFOANI 85 86000"
-        # More flexible regex to catch various formats
         transaction_pattern = r'(\d+\s*p[cs]?)\s+([^0-9]+?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s*$'
         
         match = re.search(transaction_pattern, line, re.IGNORECASE)
@@ -181,52 +165,15 @@ def parse_handwritten_transactions(ocr_text):
             unit_price = float(match.group(3))
             total_amount = float(match.group(4))
             
-            transaction = {
+            transactions.append({
                 'date': transaction_date,
                 'quantity': quantity,
                 'description': description,
                 'unit_price': unit_price,
                 'total_amount': total_amount,
                 'currency': 'Rp'
-            }
-            transactions.append(transaction)
+            })
             print(f"  ✅ Found transaction: {quantity} {description} - Rp {total_amount}")
-        else:
-            # Try alternative pattern for lines that might be split differently
-            qty_pattern = r'^(\d+\s*p[cs]?)\s+(.+)'
-            qty_match = re.search(qty_pattern, line, re.IGNORECASE)
-            
-            if qty_match:
-                # Look for numbers in this line
-                numbers = re.findall(r'\d+(?:\.\d+)?', line)
-                if len(numbers) >= 2:
-                    quantity = qty_match.group(1).strip()
-                    description = qty_match.group(2).strip()
-                    
-                    # Remove numbers from description
-                    description = re.sub(r'\d+(?:\.\d+)?', '', description).strip()
-                    
-                    # Last two numbers are likely unit price and total
-                    unit_price = float(numbers[-2]) if len(numbers) >= 2 else 0
-                    total_amount = float(numbers[-1]) if numbers else 0
-                    
-                    if unit_price > 0 and total_amount > 0:
-                        transaction = {
-                            'date': transaction_date,
-                            'quantity': quantity,
-                            'description': description,
-                            'unit_price': unit_price,
-                            'total_amount': total_amount,
-                            'currency': 'Rp'
-                        }
-                        transactions.append(transaction)
-                        print(f"  ✅ Found transaction (alt): {quantity} {description} - Rp {total_amount}")
-                    else:
-                        print(f"  ❌ Invalid prices: {unit_price}, {total_amount}")
-                else:
-                    print(f"  ❌ Not enough numbers found: {numbers}")
-            else:
-                print(f"  ❌ No quantity pattern found")
     
     print(f"🎯 Total transactions found: {len(transactions)}")
     return transactions
@@ -238,11 +185,9 @@ def add_transactions_to_sheet(transactions):
         if not sheet:
             return False, "Google Sheets not connected"
             
-        # Add headers if sheet is empty
         if not sheet.get_all_values():
             sheet.append_row(['Date', 'Quantity', 'Description', 'Unit Price', 'Total Amount', 'Currency'])
         
-        # Add each transaction
         rows_added = 0
         for transaction in transactions:
             sheet.append_row([
@@ -257,14 +202,13 @@ def add_transactions_to_sheet(transactions):
         
         return True, f"Added {rows_added} transactions"
     except Exception as e:
-        print(f"Sheet update error: {e}")
         return False, str(e)
 
-# Format currency for Indonesian Rupiah
+# Format currency
 def format_rupiah(amount):
     return f"Rp {amount:,.0f}".replace(',', '.')
 
-# Bot command handlers
+# Bot message handlers
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     welcome_text = """
@@ -275,77 +219,13 @@ def send_welcome(message):
 ✅ Menambahkan ke Google Sheet
 ✅ Memberikan konfirmasi
 
-Format yang didukung:
-• 1pc Nama Produk 85 86000
-• 2pcs Item Description 100 200000
-
 Kirim foto untuk memulai!
 
 Commands:
 /help - Bantuan
 /status - Status bot
-/test - Test OCR dengan gambar sampel
     """
     bot.reply_to(message, welcome_text)
-
-@bot.message_handler(commands=['test'])
-def test_ocr_api(message):
-    test_msg = bot.reply_to(message, "🧪 Testing OCR API dengan gambar sampel...")
-    
-    try:
-        # Test with a simple online image
-        test_image_url = "https://dl.a9t9.com/ocr/solarcell.jpg"
-        
-        payload = {
-            'url': test_image_url,
-            'apikey': OCR_API_KEY,
-            'language': 'eng',
-            'isOverlayRequired': 'false'
-        }
-        
-        response = requests.post('https://api.ocr.space/parse/image', data=payload, timeout=30)
-        result = response.json()
-        
-        if result.get('IsErroredOnProcessing'):
-            error_msg = result.get('ErrorMessage', 'Unknown error')
-            bot.edit_message_text(f"❌ OCR Test Failed: {error_msg}", message.chat.id, test_msg.message_id)
-        elif result.get('ParsedResults') and len(result['ParsedResults']) > 0:
-            extracted_text = result['ParsedResults'][0]['ParsedText'][:100]
-            bot.edit_message_text(f"✅ OCR Test Success!\n\nSample text: {extracted_text}...", message.chat.id, test_msg.message_id)
-        else:
-            bot.edit_message_text("❌ OCR Test: No text extracted", message.chat.id, test_msg.message_id)
-            
-    except Exception as e:
-        bot.edit_message_text(f"❌ OCR Test Error: {str(e)}", message.chat.id, test_msg.message_id)
-
-@bot.message_handler(commands=['help'])
-def send_help(message):
-    help_text = """
-🤖 Panduan Transaction Bot:
-
-📷 Cara menggunakan:
-1. Tulis daftar transaksi di kertas dengan format:
-   [Jumlah] [Nama Item] [Harga Satuan] [Total]
-   
-   Contoh:
-   1pc Std ballon JW 85 86000
-   2pcs Std Ayana 85 170000
-
-2. Foto daftar transaksi
-3. Kirim foto ke bot ini
-4. Tunggu pemrosesan (30-90 detik)
-5. Terima konfirmasi dengan data yang diekstrak
-
-💡 Tips:
-• Pastikan tulisan jelas dan mudah dibaca
-• Gunakan format: [qty]pc/pcs [nama] [harga] [total]
-• Sertakan tanggal di bagian atas
-• Coba /test untuk test API
-• Coba /status untuk status bot
-
-❓ Ada masalah? Pastikan tulisan terbaca dengan jelas!
-    """
-    bot.reply_to(message, help_text)
 
 @bot.message_handler(commands=['status'])
 def send_status(message):
@@ -356,87 +236,102 @@ def send_status(message):
 🔍 Status Bot:
 📊 Google Sheets: {sheet_status}
 👁️ OCR Service: {ocr_status}
-🤖 Bot: ✅ Berjalan
+🤖 Bot: ✅ Berjalan (Webhook Mode)
 🔑 API Key: {OCR_API_KEY[:8]}...
 
 Update terakhir: {datetime.now().strftime("%Y-%m-%d %H:%M")}
-
-💡 Gunakan /test untuk test OCR API
     """
     bot.reply_to(message, status_text)
 
-# Handle photo messages with enhanced debugging
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     try:
-        # Send processing message
         processing_msg = bot.reply_to(message, "📝 Memproses daftar transaksi... Mohon tunggu 30-90 detik.")
         
-        # Get the largest photo size
         photo = message.photo[-1]
-        
-        # Get file info
         file_info = bot.get_file(photo.file_id)
         
         print(f"📸 Processing photo: {file_info.file_path}")
         
-        # Extract text using OCR with image download
         ocr_text, error_msg = extract_text_from_telegram_image(BOT_TOKEN, file_info.file_path)
         
         if not ocr_text:
-            error_response = f"❌ Maaf, tidak bisa membaca tulisan.\n\n🔍 Detail error: {error_msg}\n\n💡 Tips:\n• Pastikan foto jelas dan terang\n• Tulisan tidak terlalu kecil\n• Tidak ada bayangan pada kertas\n• Coba /test untuk test API\n• Coba ambil foto lagi"
+            error_response = f"❌ Maaf, tidak bisa membaca tulisan.\n\n🔍 Detail error: {error_msg}\n\n💡 Coba foto yang lebih jelas"
             bot.edit_message_text(error_response, message.chat.id, processing_msg.message_id)
             return
         
-        # Parse handwritten transactions
         transactions = parse_handwritten_transactions(ocr_text)
         
         if not transactions:
-            debug_response = f"❌ Tidak ada transaksi yang terdeteksi.\n\n📝 Teks yang terbaca:\n{ocr_text[:500]}...\n\n💡 Pastikan format sesuai:\n1pc Nama Item 85 86000"
+            debug_response = f"❌ Tidak ada transaksi terdeteksi.\n\n📝 Teks terbaca:\n{ocr_text[:300]}..."
             bot.edit_message_text(debug_response, message.chat.id, processing_msg.message_id)
             return
         
-        # Add to Google Sheets
         sheet_success, sheet_message = add_transactions_to_sheet(transactions)
-        
-        # Calculate total
         grand_total = sum(t['total_amount'] for t in transactions)
         
-        # Format response message
         response = f"✅ Berhasil memproses {len(transactions)} transaksi!\n\n"
+        response += "📋 **Ringkasan:**\n"
         
-        # Add transaction summary (max 5 items)
-        response += "📋 **Ringkasan Transaksi:**\n"
-        for i, t in enumerate(transactions[:5]):
+        for i, t in enumerate(transactions[:3]):
             response += f"• {t['quantity']} {t['description']} - {format_rupiah(t['total_amount'])}\n"
         
-        if len(transactions) > 5:
-            response += f"... dan {len(transactions) - 5} item lainnya\n"
+        if len(transactions) > 3:
+            response += f"... dan {len(transactions) - 3} item lainnya\n"
         
-        response += f"\n💰 **Total Keseluruhan: {format_rupiah(grand_total)}**\n"
+        response += f"\n💰 **Total: {format_rupiah(grand_total)}**\n"
         response += f"📅 **Tanggal: {transactions[0]['date']}**\n\n"
         
         if sheet_success:
             response += f"✅ **{sheet_message} ke Google Sheet!**"
         else:
-            response += f"⚠️ **Data diproses tapi Google Sheets belum terhubung**\n{sheet_message}"
+            response += f"⚠️ **Google Sheets belum terhubung**"
         
-        # Edit the processing message with results
         bot.edit_message_text(response, message.chat.id, processing_msg.message_id, parse_mode='Markdown')
         
     except Exception as e:
-        error_msg = f"❌ Error memproses transaksi: {str(e)}"
+        error_msg = f"❌ Error: {str(e)}"
         print(error_msg)
         bot.reply_to(message, error_msg)
 
-# Handle other messages
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    bot.reply_to(message, "📝 Silakan kirim foto daftar transaksi tulisan tangan untuk diproses!\n\nGunakan /help untuk panduan lengkap atau /test untuk test OCR API.")
+    bot.reply_to(message, "📝 Kirim foto daftar transaksi untuk diproses!\n\nGunakan /help untuk panduan.")
+
+# Flask webhook endpoint
+@app.route('/')
+def index():
+    return "🤖 Transaction Bot is running!"
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        json_str = request.get_data().decode('UTF-8')
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return "OK", 200
+    except Exception as e:
+        print(f"Webhook error: {e}")
+        return "Error", 500
 
 if __name__ == '__main__':
-    print("🤖 Transaction Bot starting...")
+    print("🤖 Setting up webhook...")
+    
+    # Set webhook
+    webhook_url = f"{WEBHOOK_URL}/webhook"
+    webhook_info = bot.get_webhook_info()
+    
+    if webhook_info.url != webhook_url:
+        print(f"🔗 Setting webhook to: {webhook_url}")
+        bot.remove_webhook()
+        success = bot.set_webhook(url=webhook_url)
+        print(f"✅ Webhook set: {success}")
+    else:
+        print("✅ Webhook already configured")
+    
     print(f"🔑 OCR API Key: {'✅ Set' if OCR_API_KEY != 'YOUR_OCR_API_KEY' else '❌ NOT SET!'}")
-    print(f"🤖 Bot Token: {'✅ Set' if BOT_TOKEN != 'YOUR_BOT_TOKEN_HERE' else '❌ NOT SET!'}")
-    print("✅ Bot berjalan dan menunggu pesan!")
-    bot.polling(none_stop=True)
+    print("✅ Bot running in webhook mode!")
+    
+    # Run Flask app
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
